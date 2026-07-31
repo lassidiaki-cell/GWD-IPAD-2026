@@ -1,0 +1,4 @@
+Flask>=3.0,<4
+pyswisseph>=2.10
+Pillow>=10,<12
+gunicorn>=22,<24
