@@ -33,6 +33,15 @@ Flask, jsonify, request, swe = _charger_dependances_dg()
 
 app = Flask(__name__)
 
+@app.after_request
+def entetes_ipad_sans_cache_dg(reponse):
+    """Empêche Safari et l’ancien service worker de conserver une page noire."""
+    if request.path in ('/', '/service-worker.js', '/manifest.webmanifest'):
+        reponse.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        reponse.headers['Pragma'] = 'no-cache'
+        reponse.headers['Expires'] = '0'
+    return reponse
+
 # DG : calcul astronomique autonome avec Swiss Ephemeris.
 # Aucun logiciel Stellarium ni commande à distance n’est nécessaire.
 PLANETES_SWISS = {
@@ -876,47 +885,19 @@ def accueil():
 <link rel="apple-touch-icon" href="/icon-192.png">
 <title>G W D – Tablette</title>
 <script>
-/* DG 25W : recharge les réglages durables AVANT l'initialisation de l'interface. */
-(function(){
-  const PREFIXES_DG=['gwd','GWD'];
-  function estCleGwdDG(k){return PREFIXES_DG.some(p=>String(k||'').startsWith(p));}
-  try{
-    const xhr=new XMLHttpRequest();
-    xhr.open('GET','/gwd-settings',false);
-    xhr.send(null);
-    if(xhr.status>=200 && xhr.status<300){
-      const r=JSON.parse(xhr.responseText||'{}');
-      const d=(r&&r.settings&&typeof r.settings==='object')?r.settings:{};
-      Object.keys(d).forEach(k=>{try{localStorage.setItem(k,String(d[k]));}catch(e){}});
-    }
-  }catch(e){console.warn('Chargement réglages GWD:',e);}
-
-  let timerDG=null;
-  function snapshotDG(){
-    const d={};
-    try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(estCleGwdDG(k))d[k]=localStorage.getItem(k);}}catch(e){}
-    return d;
-  }
-  function sauvegarderDG(immediat){
-    const envoyer=()=>{
-      timerDG=null;
-      try{
-        fetch('/gwd-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({settings:snapshotDG()}),keepalive:true});
-      }catch(e){console.warn('Sauvegarde réglages GWD:',e);}
-    };
-    if(immediat){if(timerDG)clearTimeout(timerDG);envoyer();}
-    else{if(timerDG)clearTimeout(timerDG);timerDG=setTimeout(envoyer,180);}
-  }
-  const setOrig=Storage.prototype.setItem;
-  const removeOrig=Storage.prototype.removeItem;
-  const clearOrig=Storage.prototype.clear;
-  Storage.prototype.setItem=function(k,v){setOrig.call(this,k,v);if(this===localStorage&&estCleGwdDG(k))sauvegarderDG(false);};
-  Storage.prototype.removeItem=function(k){removeOrig.call(this,k);if(this===localStorage&&estCleGwdDG(k))sauvegarderDG(false);};
-  Storage.prototype.clear=function(){clearOrig.call(this);if(this===localStorage)sauvegarderDG(false);};
-  window.gwdSauvegarderReglagesDurablesDG=()=>sauvegarderDG(true);
-  window.addEventListener('beforeunload',()=>sauvegarderDG(true));
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')sauvegarderDG(true);});
-})();
+/* DG iPad corrigé : aucun appel réseau bloquant avant l’affichage.
+   Les réglages sont chargés après l’ouverture de la page. */
+window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const reponse = await fetch('/gwd-settings', {cache: 'no-store'});
+    if (!reponse.ok) return;
+    const resultat = await reponse.json();
+    const reglages = (resultat && resultat.settings && typeof resultat.settings === 'object') ? resultat.settings : {};
+    Object.keys(reglages).forEach(cle => {
+      try { localStorage.setItem(cle, String(reglages[cle])); } catch (_) {}
+    });
+  } catch (_) {}
+});
 </script>
 <style>
 :root{
@@ -4842,6 +4823,7 @@ body.gwd-couleurs-force-dg .nature-gonzalez-panneau-dg,
 
 </head>
 <body>
+<div id="gwd-demarrage-ipad" style="position:relative;z-index:1;background:#001526;color:#fff;border:2px solid #2f8fff;border-radius:12px;padding:12px 16px;margin:0 0 14px;font-family:Arial,sans-serif;font-weight:800;text-align:center;box-shadow:0 0 16px rgba(47,143,255,.45)">G W D — application chargée sur iPad</div>
 
 <h1>Astrologie Médicale et Comportementale</h1>
 <div class="card" style="color:#FFFFFF;font-weight:bold;">MODE AUTONOME : calcul astronomique intégré — Stellarium non nécessaire.</div>
@@ -7920,7 +7902,8 @@ async function swissPourDateDG(dateISO){
     params.set("lat",document.getElementById("latitude_calc").value);
     params.set("lon",document.getElementById("longitude_calc").value);
     params.set("tz",document.getElementById("tz_calc").value);
-    let rep=await fetch("/swiss?"+params.toString());
+    let rep=await fetch(window.location.origin+"/swiss?"+params.toString(), {cache:"no-store",headers:{"Accept":"application/json"}});
+    if(!rep.ok) throw new Error("Serveur HTTP "+rep.status);
     return await rep.json();
 }
 function badgeOrdreDG(code){
@@ -8129,8 +8112,30 @@ async function prendreSwissDG(modeRapideDG=false){
     let rep;
     let donnees;
     try{
-        rep=await fetch("/swiss?"+params.toString());
-        donnees=await rep.json();
+        // iPad + Render Free : le serveur peut se réveiller lentement.
+        // Trois essais évitent l’erreur Safari « TypeError: Load failed ».
+        let derniereErreurDG=null;
+        for(let tentativeDG=1; tentativeDG<=3; tentativeDG++){
+            try{
+                rep=await fetch(window.location.origin+"/swiss?"+params.toString(), {
+                    method:"GET",
+                    cache:"no-store",
+                    headers:{"Accept":"application/json"}
+                });
+                if(!rep.ok) throw new Error("Serveur HTTP "+rep.status);
+                donnees=await rep.json();
+                derniereErreurDG=null;
+                break;
+            }catch(errDG){
+                derniereErreurDG=errDG;
+                if(tentativeDG<3){
+                    let infoAttenteDG=document.getElementById("dernier_calcul_dg");
+                    if(infoAttenteDG) infoAttenteDG.innerHTML="Réveil du serveur G W D… nouvel essai "+(tentativeDG+1)+"/3";
+                    await new Promise(resolve=>setTimeout(resolve, tentativeDG*2500));
+                }
+            }
+        }
+        if(derniereErreurDG) throw new Error("Connexion momentanément indisponible. Attendez 10 secondes puis recommencez.");
     }catch(e){
         // Une annulation résiduelle éventuelle ne doit jamais ouvrir une alerte.
         if(e && (e.name==="AbortError" || String(e).includes("Fetch is aborted"))) return;
@@ -10605,27 +10610,48 @@ async function appliquerPositionCoordonneesDG(lat,lon,alt,afficherMessage,meta={
  if(afficherMessage)alert('Position réelle de la tablette détectée et calculs actualisés.');
  return true;
 }
+function estIPadOuNavigateurDG(){
+ const ua=String(navigator.userAgent||'');
+ const ipad=/iPad|iPhone|iPod/i.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+ return ipad||!(window.pywebview&&window.pywebview.api&&window.pywebview.api.position_reelle_mac);
+}
+function demanderPositionUneFoisDG(options){
+ return new Promise((resolve,reject)=>{
+   let fini=false;
+   const terminer=(ok,val)=>{if(fini)return;fini=true;clearTimeout(garde);ok?resolve(val):reject(val);};
+   const garde=setTimeout(()=>terminer(false,new Error('La tablette n’a pas répondu à la demande GPS.')),Number(options.timeout||12000)+2500);
+   navigator.geolocation.getCurrentPosition(
+     pos=>terminer(true,pos),
+     err=>terminer(false,err),
+     options
+   );
+ });
+}
 async function obtenirPositionNavigateurDG(afficherMessage,metaErreurNative=''){
  if(!navigator.geolocation)throw new Error(metaErreurNative||'La position automatique n’est pas disponible sur cet appareil.');
- return await new Promise((resolve,reject)=>{
-   navigator.geolocation.getCurrentPosition(async pos=>{
-     try{
-       await appliquerPositionCoordonneesDG(
-         Number(pos.coords.latitude),Number(pos.coords.longitude),
-         Number.isFinite(pos.coords.altitude)?Math.round(pos.coords.altitude):0,
-         afficherMessage,{precision:pos.coords.accuracy,source:'navigateur'}
-       );
-       resolve(true);
-     }catch(e){reject(e);}
-   },err=>{
-     let msg=metaErreurNative?metaErreurNative+' ':'';
-     if(err.code===1)msg+='Autorisation refusée. Sur l’iPad, ouvre Réglages > Confidentialité et sécurité > Service de localisation, puis autorise Safari et G W D.';
-     else if(err.code===2)msg+='Le service de localisation ne trouve pas la position de la tablette.';
-     else if(err.code===3)msg+='La recherche de position a pris trop de temps.';
-     else msg+='Impossible de récupérer la position.';
-     reject(new Error(msg.trim()));
-   },{enableHighAccuracy:true,timeout:25000,maximumAge:15000});
- });
+ let derniereErreur=null;
+ const essais=[
+   {enableHighAccuracy:true,timeout:12000,maximumAge:0},
+   {enableHighAccuracy:false,timeout:8000,maximumAge:300000}
+ ];
+ for(const options of essais){
+   try{
+     const pos=await demanderPositionUneFoisDG(options);
+     await appliquerPositionCoordonneesDG(
+       Number(pos.coords.latitude),Number(pos.coords.longitude),
+       Number.isFinite(pos.coords.altitude)?Math.round(pos.coords.altitude):0,
+       afficherMessage,{precision:pos.coords.accuracy,source:'ipad-navigateur',forcer:true}
+     );
+     return true;
+   }catch(e){derniereErreur=e;}
+ }
+ const err=derniereErreur||{};
+ let msg=metaErreurNative?metaErreurNative+' ':'';
+ if(err.code===1)msg+='Autorisation refusée. Ouvre Réglages > Confidentialité et sécurité > Service de localisation > G W D, puis choisis Lors de mon partage et garde Position exacte activée.';
+ else if(err.code===2)msg+='Le GPS de l’iPad ne trouve pas encore la position. Active aussi le Wi-Fi ou les données mobiles, puis recommence.';
+ else if(err.code===3)msg+='La recherche GPS a dépassé le délai. Ferme complètement G W D, rouvre-le puis recommence.';
+ else msg+=String(err.message||'Impossible de récupérer la position de la tablette.');
+ throw new Error(msg.trim());
 }
 async function _detecterPositionReelleInterneDG(afficherMessage=false,options={}){
  const bouton=document.getElementById('bouton_position_reelle_dg');
@@ -10633,7 +10659,9 @@ async function _detecterPositionReelleInterneDG(afficherMessage=false,options={}
  etatPositionReelleDG('⏳ Recherche de la position réelle de la tablette…','recherche');
  let erreurNative='';
  try{
-   const apiPrete=await attendreApiPositionMacDG(options.initiale?5000:3500);
+   // Sur iPad, utiliser directement le GPS du navigateur. Ne jamais attendre le pont GPS du Mac.
+   if(estIPadOuNavigateurDG())return await obtenirPositionNavigateurDG(afficherMessage,'');
+   const apiPrete=await attendreApiPositionMacDG(options.initiale?2500:1500);
    if(apiPrete){
      try{
        const appel=window.pywebview.api.position_reelle_mac();
@@ -10691,6 +10719,7 @@ setTimeout(async()=>{
  let x=null;try{x=JSON.parse(localStorage.getItem('gwd_lieu_actuel_dg')||'null')}catch(e){}
  choisirLieuDG(x||LIEUX_DG_DEFAUT[0]);
  // Démarrage automatique : attend le pont pywebview avant d'utiliser Core Location.
+ if(document.visibilityState!=='visible')return;
  const ok=await detecterPositionReelleDG(false,{initiale:true});
  if(ok&&suiviPositionDGActif)demarrerSuiviPositionDG();
 },250);
@@ -11112,8 +11141,40 @@ async function calculerPhenomenesAstronomiquesDG(){
     const cleCacheDG=params.toString();
     let data=cachePhenomenesDG.get(cleCacheDG);
     if(!data){
-      const rep=await fetch('/events?'+cleCacheDG);
-      data=await rep.json();
+      // iPad / Safari / PWA : utiliser une adresse absolue évite l'erreur
+      // « SyntaxError: The string did not match the expected pattern ».
+      const adresseEventsDG=window.location.origin+'/events?'+cleCacheDG;
+      let derniereErreurEventsDG=null;
+      for(let tentativeEventsDG=1; tentativeEventsDG<=2; tentativeEventsDG++){
+        const controleurEventsDG=new AbortController();
+        const minuterieEventsDG=setTimeout(()=>controleurEventsDG.abort(),75000);
+        try{
+          const rep=await fetch(adresseEventsDG,{
+            method:'GET',
+            cache:'no-store',
+            headers:{'Accept':'application/json'},
+            signal:controleurEventsDG.signal
+          });
+          clearTimeout(minuterieEventsDG);
+          const texteRepDG=await rep.text();
+          if(!rep.ok) throw new Error('Serveur HTTP '+rep.status);
+          try{ data=JSON.parse(texteRepDG); }
+          catch(e){ throw new Error('Réponse du serveur invalide. Rechargez G W D puis recommencez.'); }
+          derniereErreurEventsDG=null;
+          break;
+        }catch(e){
+          clearTimeout(minuterieEventsDG);
+          derniereErreurEventsDG=e;
+          if(tentativeEventsDG<2){
+            tbody.innerHTML='<tr><td colspan="9">⏳ Réveil du serveur G W D… deuxième essai automatique.</td></tr>';
+            await new Promise(resolve=>setTimeout(resolve,2500));
+          }
+        }
+      }
+      if(derniereErreurEventsDG){
+        if(derniereErreurEventsDG.name==='AbortError') throw new Error('Le calcul a dépassé 75 secondes. Appuyez de nouveau sur CALCULER.');
+        throw derniereErreurEventsDG;
+      }
       if(data?.ok) cachePhenomenesDG.set(cleCacheDG,data);
     }
     if(!data.ok) throw new Error(data.error||'Calcul impossible');
@@ -11421,9 +11482,19 @@ setTimeout(installerSauvegardePersistanteDG,1200);
 </script>
 
 <script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js').catch(()=>{}));
-}
+/* Nettoyage de l’ancien cache PWA qui pouvait conserver un écran noir. */
+window.addEventListener('load', async () => {
+  try {
+    if ('serviceWorker' in navigator) {
+      const inscriptions = await navigator.serviceWorker.getRegistrations();
+      for (const inscription of inscriptions) await inscription.unregister();
+    }
+    if ('caches' in window) {
+      const noms = await caches.keys();
+      for (const nom of noms) await caches.delete(nom);
+    }
+  } catch (_) {}
+});
 </script>
 </body>
 </html>
